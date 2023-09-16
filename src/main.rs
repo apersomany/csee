@@ -83,10 +83,10 @@ fn clean() -> Result<()> {
 }
 
 fn run_trial(impairment: &str, quantity: &str) -> Result<()> {
-    const DURATION: f64 = 0.05f64;
+    const DURATION: f64 = 0.05;
     const DIVISION: usize = 200;
     execute(
-        format!("tc qdisc add dev server root netem {impairment} {quantity} rate 1gbit"),
+        format!("tc qdisc add dev server root netem {impairment} {quantity} rate 1073741824bit"),
         Some("server"),
     )?;
     let mut stream = TcpStream::connect("10.1.1.1:1234")?;
@@ -107,16 +107,29 @@ fn run_trial(impairment: &str, quantity: &str) -> Result<()> {
         amount.fetch_add(stream.read(buffer.as_mut())?, Ordering::AcqRel);
     }
     execute(
-        format!("tc qdisc del dev server root netem {impairment} {quantity} rate 1gbit"),
+        format!("tc qdisc del dev server root netem {impairment} {quantity} rate 1073741824bit"),
         Some("server"),
     )?;
+    let speeds = speeds.join().unwrap();
     let path = format!("{impairment}_{quantity}.png");
     let root = BitMapBackend::new(&path, (1024, 512)).into_drawing_area();
     root.fill(&WHITE)?;
-    let mut chart =
-        ChartBuilder::on(&root).build_cartesian_2d(0..DIVISION, 0f64..2f64.powf(10f64))?;
+    let mut chart = ChartBuilder::on(&root)
+        .set_label_area_size(LabelAreaPosition::Bottom, 40)
+        .set_label_area_size(LabelAreaPosition::Left, 80)
+        .build_cartesian_2d(0f64..DURATION * DIVISION as f64, 0f64..2f64.powf(10f64))?;
+    chart
+        .configure_mesh()
+        .x_desc("Time")
+        .y_desc("Speed")
+        .x_label_formatter(&|x| format!("{:2.1}s", x))
+        .y_label_formatter(&|y| format!("{y}Mb/s"))
+        .draw()?;
     chart.draw_series(LineSeries::new(
-        speeds.join().unwrap().into_iter().enumerate(),
+        speeds
+            .into_iter()
+            .enumerate()
+            .map(|(i, e)| (i as f64 * DURATION, e)),
         &RED,
     ))?;
     root.present()?;
@@ -127,7 +140,13 @@ fn main() {
     let _ = clean();
     init().unwrap();
     for i in 0..6 {
-        run_trial("duplicate", &format!("{}%", i * 10)).unwrap();
+        run_trial("delay", &format!("{}ms", i * 20)).unwrap();
+    }
+    for i in 0..6 {
+        run_trial("loss", &format!("{}%", i)).unwrap();
+    }
+    for i in 0..6 {
+        run_trial("duplicate", &format!("{}%", i)).unwrap();
     }
     clean().unwrap();
 }
