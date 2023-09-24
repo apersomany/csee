@@ -78,8 +78,10 @@ fn clean() -> Result<()> {
     Ok(())
 }
 
-const CNT: usize = 200;
-const LEN: f64 = 0.050;
+const MWS: f64 = 262144f64;
+const MSS: f64 = 1024f64;
+const CNT: usize = 600;
+const LEN: f64 = 0.100;
 const TOT: f64 = CNT as f64 * LEN;
 
 fn simulate(
@@ -92,9 +94,7 @@ fn simulate(
         .map(|(quantity, expected)| {
             println!("Simulating {impairment} {quantity}");
             execute(
-                format!(
-                    "tc qdisc add dev server root netem {impairment} {quantity} rate 1073741824bit"
-                ),
+                format!("tc qdisc add dev server root netem {impairment} {quantity}"),
                 Some("server"),
             )?;
             let mut stream = TcpStream::connect("10.1.1.1:1234")?;
@@ -107,9 +107,7 @@ fn simulate(
                     for _ in 0..CNT {
                         let now = Instant::now();
                         while now.elapsed().as_secs_f64() < LEN {}
-                        data.push(
-                            amount.swap(0, Ordering::AcqRel) as f64 / LEN / 2f64.powf(20f64 - 3f64),
-                        );
+                        data.push(amount.swap(0, Ordering::AcqRel) as f64 / LEN);
                     }
                     data
                 })
@@ -119,9 +117,7 @@ fn simulate(
             }
             let data = thread.join().unwrap();
             execute(
-                format!(
-                    "tc qdisc del dev server root netem {impairment} {quantity} rate 1073741824bit"
-                ),
+                format!("tc qdisc del dev server root netem {impairment} {quantity}"),
                 Some("server"),
             )?;
             let path = format!("out/{}_{quantity}.png", impairment.replace(" ", "_"));
@@ -135,13 +131,13 @@ fn simulate(
                 .margin(10)
                 .set_label_area_size(LabelAreaPosition::Bottom, 40)
                 .set_label_area_size(LabelAreaPosition::Left, 80)
-                .build_cartesian_2d(0f64..(TOT - LEN), 0.0..2f64.powf(10f64))?;
+                .build_cartesian_2d(0f64..(TOT - LEN), 0.0..2f64.powf(24f64))?;
             chart
                 .configure_mesh()
                 .x_desc("time")
                 .y_desc("speed")
                 .x_label_formatter(&|x| format!("{:2.1}s", x))
-                .y_label_formatter(&|y| format!("{y}mb/s"))
+                .y_label_formatter(&|y| format!("{:2.0}MB/s", y / 2f64.powf(20f64)))
                 .draw()?;
             chart
                 .draw_series(LineSeries::new(
@@ -168,8 +164,8 @@ fn simulate(
                 .draw()?;
             root.present()?;
             println!(
-                "{}mb/s",
-                data.clone().into_iter().fold(0.0, |a, b| a + b) / CNT as f64
+                "{:6.4}MB/s",
+                data.clone().into_iter().fold(0.0, |a, b| a + b) / CNT as f64 / 2f64.powf(20f64)
             );
             Ok(data.into_iter().fold(0.0, |a, b| a + b) / CNT as f64)
         })
@@ -185,13 +181,13 @@ fn simulate(
         .margin(20)
         .set_label_area_size(LabelAreaPosition::Bottom, 40)
         .set_label_area_size(LabelAreaPosition::Left, 80)
-        .build_cartesian_2d(0..data.len() - 1, 0f64..2f64.powf(10f64))?;
+        .build_cartesian_2d(0..data.len() - 1, 0.0..2f64.powf(24f64))?;
     chart
         .configure_mesh()
         .x_desc(impairment)
         .y_desc("speed")
         .x_label_formatter(&|x| quantities[*x].0.clone())
-        .y_label_formatter(&|y| format!("{y}mb/s"))
+        .y_label_formatter(&|y| format!("{:2.0}MB/s", y / 2f64.powf(20f64)))
         .draw()?;
     chart
         .draw_series(LineSeries::new(data.into_iter().enumerate(), &RED))?
@@ -217,38 +213,38 @@ fn main() {
     init().unwrap();
     // simulate(
     //     "delay",
-    //     (0..11).map(|i| {
+    //     (1..11).map(|i| {
     //         (
     //             format!("{}ms", i * 10),
-    //             Some((100f64 / i as f64).min(2f64.powf(10f64))), // ((i * 10 / 1000))
+    //             Some(MWS / (0.010f64 * i as f64) / 3f64),
     //         )
     //     }),
     // )
     // .unwrap();
     // simulate(
-    //     "loss",
+    //     "delay 10ms loss",
     //     (0..11).map(|i| {
     //         (
-    //             format!("{}%", i),
-    //             Some(2f64.powf(10f64) / (i as f64).sqrt()), // (2 ^ 10 / sqrt(i))
+    //             format!("{:2.1}%", i as f64 / 10f64),
+    //             Some(MSS / 0.010f64 * 3f64 / (i as f64 / 1000f64).sqrt()),
     //         )
     //     }),
     // )
     // .unwrap();
     // simulate(
-    //     "duplicate",
-    //     (0..11).map(|i| {
-    //         (
-    //             format!("{}%", i),
-    //             Some(1024f64 / (1f64 + i as f64 / 100f64)),
-    //         )
-    //     }),
+    //     "delay 10ms reorder",
+    //     (0..11).map(|i| (format!("{}%", i as f64 / 10f64), None)),
     // )
     // .unwrap();
+    // clean().unwrap();
     simulate(
-        "delay 10ms reorder",
-        (0..11).map(|i| (format!("{:2.1}%", i as f64 / 5f64), None)),
+        "duplicate",
+        (0..11).map(|i| {
+            (
+                format!("{}%", i),
+                Some(2f64.powf(24f64) / (1f64 + i as f64 / 100f64)),
+            )
+        }),
     )
     .unwrap();
-    clean().unwrap();
 }
