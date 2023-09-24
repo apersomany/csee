@@ -78,99 +78,177 @@ fn clean() -> Result<()> {
     Ok(())
 }
 
-const DURATION: f64 = 0.050;
-const DIVISION: usize = 200;
+const CNT: usize = 200;
+const LEN: f64 = 0.050;
+const TOT: f64 = CNT as f64 * LEN;
 
-fn run(impairment: &str, quantity: &str) -> Result<f64> {
-    execute(
-        format!("tc qdisc add dev server root netem {impairment} {quantity} rate 1073741824bit"),
-        Some("server"),
-    )?;
-    let path = format!("out/{impairment}_{quantity}.png");
+fn simulate(
+    impairment: &str,
+    quantities: impl Iterator<Item = (String, Option<f64>)>,
+) -> Result<()> {
+    let quantities = quantities.collect::<Vec<_>>();
+    let data = quantities
+        .iter()
+        .map(|(quantity, expected)| {
+            println!("Simulating {impairment} {quantity}");
+            execute(
+                format!(
+                    "tc qdisc add dev server root netem {impairment} {quantity} rate 1073741824bit"
+                ),
+                Some("server"),
+            )?;
+            let mut stream = TcpStream::connect("10.1.1.1:1234")?;
+            let mut buffer = Box::new([0; 1024]);
+            let amount = Arc::new(AtomicUsize::new(0));
+            let thread = {
+                let amount = amount.clone();
+                spawn(move || {
+                    let mut data = Vec::new();
+                    for _ in 0..CNT {
+                        let now = Instant::now();
+                        while now.elapsed().as_secs_f64() < LEN {}
+                        data.push(
+                            amount.swap(0, Ordering::AcqRel) as f64 / LEN / 2f64.powf(20f64 - 3f64),
+                        );
+                    }
+                    data
+                })
+            };
+            while !thread.is_finished() {
+                amount.fetch_add(stream.read(buffer.as_mut())?, Ordering::AcqRel);
+            }
+            let data = thread.join().unwrap();
+            execute(
+                format!(
+                    "tc qdisc del dev server root netem {impairment} {quantity} rate 1073741824bit"
+                ),
+                Some("server"),
+            )?;
+            let path = format!("out/{}_{quantity}.png", impairment.replace(" ", "_"));
+            let root = BitMapBackend::new(&path, (1024, 512)).into_drawing_area();
+            root.fill(&WHITE)?;
+            let mut chart = ChartBuilder::on(&root)
+                .caption(
+                    format!("{impairment} ({quantity})"),
+                    (FontFamily::SansSerif, 20).into_font(),
+                )
+                .margin(10)
+                .set_label_area_size(LabelAreaPosition::Bottom, 40)
+                .set_label_area_size(LabelAreaPosition::Left, 80)
+                .build_cartesian_2d(0f64..(TOT - LEN), 0.0..2f64.powf(10f64))?;
+            chart
+                .configure_mesh()
+                .x_desc("time")
+                .y_desc("speed")
+                .x_label_formatter(&|x| format!("{:2.1}s", x))
+                .y_label_formatter(&|y| format!("{y}mb/s"))
+                .draw()?;
+            chart
+                .draw_series(LineSeries::new(
+                    data.clone()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, e)| (i as f64 * LEN, e)),
+                    &RED,
+                ))?
+                .label("measured")
+                .legend(|(x, y)| Rectangle::new([(x, y - 5), (x + 10, y + 5)], RED.filled()));
+            if let Some(expected) = expected {
+                chart
+                    .draw_series(LineSeries::new(
+                        [(0f64, *expected), (TOT, *expected)],
+                        &BLUE,
+                    ))?
+                    .label("expected")
+                    .legend(|(x, y)| Rectangle::new([(x, y - 5), (x + 10, y + 5)], BLUE.filled()));
+            }
+            chart
+                .configure_series_labels()
+                .border_style(&BLACK)
+                .draw()?;
+            root.present()?;
+            println!(
+                "{}mb/s",
+                data.clone().into_iter().fold(0.0, |a, b| a + b) / CNT as f64
+            );
+            Ok(data.into_iter().fold(0.0, |a, b| a + b) / CNT as f64)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let path = format!("out/{}.png", impairment.replace(" ", "_"));
     let root = BitMapBackend::new(&path, (1024, 512)).into_drawing_area();
     root.fill(&WHITE)?;
     let mut chart = ChartBuilder::on(&root)
+        .caption(
+            format!("{impairment} vs speed"),
+            (FontFamily::SansSerif, 20).into_font(),
+        )
+        .margin(20)
         .set_label_area_size(LabelAreaPosition::Bottom, 40)
         .set_label_area_size(LabelAreaPosition::Left, 80)
-        .build_cartesian_2d(0.0..DURATION * DIVISION as f64, 0.0..2f64.powf(10.0))?;
+        .build_cartesian_2d(0..data.len() - 1, 0f64..2f64.powf(10f64))?;
     chart
         .configure_mesh()
-        .x_desc("Time")
-        .y_desc("Speed")
-        .x_label_formatter(&|x| format!("{:2.1}s", x))
-        .y_label_formatter(&|y| format!("{y}Mb/s"))
+        .x_desc(impairment)
+        .y_desc("speed")
+        .x_label_formatter(&|x| quantities[*x].0.clone())
+        .y_label_formatter(&|y| format!("{y}mb/s"))
         .draw()?;
-    let mut averages = Vec::new();
-    for i in 1..4 {
-        let mut stream = TcpStream::connect("10.1.1.1:1234")?;
-        let mut buffer = Box::new([0; 1024]);
-        let amount = Arc::new(AtomicUsize::new(0));
-        let speeds = {
-            let amount = amount.clone();
-            spawn(move || {
-                let mut speeds = Vec::new();
-                for _ in 0..DIVISION {
-                    let now = Instant::now();
-                    while now.elapsed().as_secs_f64() < DURATION {}
-                    speeds
-                        .push(amount.swap(0, Ordering::AcqRel) as f64 / DURATION / 2f64.powf(17.0));
-                }
-                speeds
-            })
-        };
-        while !speeds.is_finished() {
-            amount.fetch_add(stream.read(buffer.as_mut())?, Ordering::AcqRel);
-        }
-        let speeds = speeds.join().unwrap();
-        let average = speeds.clone().into_iter().fold(0.0, |a, b| a + b) / DIVISION as f64;
-        println!("Average: {:5.2}Mb/s", average);
-        averages.push(average);
-        chart.draw_series(LineSeries::new(
-            speeds
-                .into_iter()
-                .enumerate()
-                .map(|(i, e)| (i as f64 * DURATION, e)),
-            &HSLColor(i as f64 / 3.0, 1.0, 0.5),
-        ))?;
-    }
+    chart
+        .draw_series(LineSeries::new(data.into_iter().enumerate(), &RED))?
+        .label("measured")
+        .legend(|(x, y)| Rectangle::new([(x, y - 5), (x + 10, y + 5)], RED.filled()));
+    chart
+        .draw_series(LineSeries::new(
+            quantities.into_iter().filter_map(|(_, e)| e).enumerate(),
+            &BLUE,
+        ))?
+        .label("expected")
+        .legend(|(x, y)| Rectangle::new([(x, y - 5), (x + 10, y + 5)], BLUE.filled()));
+    chart
+        .configure_series_labels()
+        .border_style(&BLACK)
+        .draw()?;
     root.present()?;
-    execute(
-        format!("tc qdisc del dev server root netem {impairment} {quantity} rate 1073741824bit"),
-        Some("server"),
-    )?;
-    let average = 1.0 / averages.len() as f64 * averages.into_iter().fold(0.0, |a, b| a + b);
-    println!("Average (Total): {:5.2}Mb/s", average);
-    Ok(average)
+    Ok(())
 }
 
 fn main() {
-    let output = execute("sysctl -a", None)
-        .unwrap()
-        .lines()
-        .filter_map(|e| {
-            if e.starts_with("net.ipv4.tcp") {
-                Some(e)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    println!("[Filtered output of sysctl -a\n{output}]");
     let _ = clean();
     init().unwrap();
-
-    for i in (0..6).map(|i| format!("{}ms", i * 20)) {
-        println!("[Running Delay {i}]");
-        run("delay", &i).unwrap();
-    }
-    for i in (0..6).map(|i| format!("{}%", i)) {
-        println!("[Running Loss {i}]");
-        run("loss", &i).unwrap();
-    }
-    for i in (0..6).map(|i| format!("{}%", i)) {
-        println!("[Running Duplicate {i}]");
-        run("duplicate", &i).unwrap();
-    }
+    // simulate(
+    //     "delay",
+    //     (0..11).map(|i| {
+    //         (
+    //             format!("{}ms", i * 10),
+    //             Some((100f64 / i as f64).min(2f64.powf(10f64))), // ((i * 10 / 1000))
+    //         )
+    //     }),
+    // )
+    // .unwrap();
+    // simulate(
+    //     "loss",
+    //     (0..11).map(|i| {
+    //         (
+    //             format!("{}%", i),
+    //             Some(2f64.powf(10f64) / (i as f64).sqrt()), // (2 ^ 10 / sqrt(i))
+    //         )
+    //     }),
+    // )
+    // .unwrap();
+    // simulate(
+    //     "duplicate",
+    //     (0..11).map(|i| {
+    //         (
+    //             format!("{}%", i),
+    //             Some(1024f64 / (1f64 + i as f64 / 100f64)),
+    //         )
+    //     }),
+    // )
+    // .unwrap();
+    simulate(
+        "delay 10ms reorder",
+        (0..11).map(|i| (format!("{:2.1}%", i as f64 / 5f64), None)),
+    )
+    .unwrap();
     clean().unwrap();
 }
