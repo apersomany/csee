@@ -6,7 +6,7 @@ edition = "2021"
 
 [dependencies.nix]
 version = "0.27"
-features = ["sched"]
+features = ["sched", "socket"]
 
 [dependencies]
 anyhow = "1.0"

@@ -1,15 +1,21 @@
+#![feature(tcp_quickack)]
+
 use std::{
     fs::File,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     ops::AddAssign,
+    os::linux::net::TcpStreamExt,
     process::Command,
     thread::spawn,
     time::{Duration, Instant},
 };
 
 use anyhow::{Error, Result};
-use nix::sched::{setns, CloneFlags};
+use nix::{
+    sched::{setns, CloneFlags},
+    sys::socket::{setsockopt, sockopt::TcpMaxSeg},
+};
 // use plotters::prelude::*;
 
 fn exec(command: impl AsRef<str>, netns: Option<&str>) -> Result<String> {
@@ -82,7 +88,7 @@ fn simulate(r: f64, p: f64) -> Result<f64> {
     loop {
         stream.read_exact(&mut buffer)?;
         length.add_assign(1);
-        if now.elapsed() > Duration::from_secs(60) {
+        if now.elapsed() > Duration::from_secs(10) {
             break;
         }
     }
@@ -90,7 +96,7 @@ fn simulate(r: f64, p: f64) -> Result<f64> {
         format!("tc qdisc del dev server root netem {rule}"),
         Some("server"),
     )?;
-    Ok(length as f64 / 60.0)
+    Ok(length as f64 / 10.0)
 }
 
 fn main() {
