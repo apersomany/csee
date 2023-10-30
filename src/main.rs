@@ -200,7 +200,7 @@ fn main() {
     root.fill(&WHITE).unwrap();
     let mut chart = ChartBuilder::on(&root)
         .caption(
-            format!("Average Throughput (KB/s) vs Packet Loss Rate (%) (r = 0.1)"),
+            format!("Average Throughput (MB/s) vs Packet Loss Rate (%) (r = 0.1)"),
             ("sans-serif", 32),
         )
         .x_label_area_size(64)
